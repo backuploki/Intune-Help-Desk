@@ -3,23 +3,46 @@ param (
     [switch]$TestMode
 )
 
-Import-Module PwshSpectreConsole
+# Suppress the Spectre Console text encoding warning
+$env:IgnoreSpectreEncoding = $true
+
+# ==========================================
+# 0. PREREQUISITES & MODULES
+# ==========================================
+$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.DeviceManagement", "PwshSpectreConsole")
+foreach ($module in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $module)) {
+        Write-Host "Installing missing module: $module..." -ForegroundColor Yellow
+        Install-Module -Name $module -Force -AllowClobber -Scope CurrentUser
+    }
+    Import-Module $module -ErrorAction Stop
+}
+
+# Clear previous cached sessions
+try { Disconnect-MgGraph -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+
+# Connect to Microsoft Graph using Device Code flow AND force it into memory (Process scope)
+Connect-MgGraph -Scopes "DeviceManagementManagedDevices.ReadWrite.All", "User.Read.All", "Directory.Read.All" -NoWelcome -UseDeviceAuthentication -ContextScope Process
 
 # ==========================================
 # 1. AUTHENTICATION & DATA GATHERING
 # ==========================================
 if (-not $TestMode) {
-    $allDevices = Invoke-SpectreCommandWithStatus -Title "Connecting..." -Spinner "Dots2" -Color Cyan -ScriptBlock {
-        Write-Host "Checking Authentication..."
-        Connect-MgGraph -Scopes "DeviceManagementManagedDevices.Read.All", "User.Read.All" -NoWelcome
-        Write-Host "Downloading Device List..."
-        $devices = Get-MgDeviceManagementManagedDevice -All -Property "id,deviceName,serialNumber,userPrincipalName,model,operatingSystem,osVersion,complianceState,lastSyncDateTime,managementAgent,totalStorageSpaceInBytes,freeStorageSpaceInBytes"
+    $allDevices = Invoke-SpectreCommandWithStatus -Title "Downloading Device List..." -Spinner "Dots2" -Color Cyan -ScriptBlock {
+        $devices = Get-MgDeviceManagementManagedDevice -All -Property "id,deviceName,serialNumber,userPrincipalName,model,operatingSystem,osVersion,complianceState,lastSyncDateTime,managementAgent,totalStorageSpaceInBytes,freeStorageSpaceInBytes,azureADDeviceId"
         return $devices
     }
+    
+    if (-not $allDevices) {
+        Write-Host "`n[ERROR] Failed to retrieve devices from Intune. The list is empty." -ForegroundColor Red
+        Write-Host "Please verify your Graph permissions and ensure devices exist in the target tenant." -ForegroundColor Red
+        exit
+    }
 } else {
+    # SANITIZED FOR GITHUB: Replaced identifying initials with generic Contoso data
     $allDevices = @(
-        [PSCustomObject]@{ Id = "111-222"; deviceName = "LAPTOP-JLR-01"; serialNumber = "PF3B99X"; userPrincipalName = "jrice@domain.com"; model = "Surface Laptop 5"; operatingSystem = "Windows"; osVersion = "10.0.22631"; complianceState = "compliant"; lastSyncDateTime = (Get-Date).AddMinutes(-45); managementAgent = "intune"; totalStorageSpaceInBytes = 256GB; freeStorageSpaceInBytes = 45GB }
-        [PSCustomObject]@{ Id = "333-444"; deviceName = "DESKTOP-DEV-02"; serialNumber = "MXL1234"; userPrincipalName = "krice@domain.com"; model = "OptiPlex 7090"; operatingSystem = "Windows"; osVersion = "10.0.19045"; complianceState = "noncompliant"; lastSyncDateTime = (Get-Date).AddDays(-3); managementAgent = "intune"; totalStorageSpaceInBytes = 512GB; freeStorageSpaceInBytes = 12GB }
+        [PSCustomObject]@{ Id = "11111111-2222-3333-4444-555555555555"; deviceName = "LAPTOP-CORP-01"; serialNumber = "PF3B99X"; userPrincipalName = "adelev@contoso.com"; model = "Surface Laptop 5"; operatingSystem = "Windows"; osVersion = "10.0.22631"; complianceState = "compliant"; lastSyncDateTime = (Get-Date).AddMinutes(-45); managementAgent = "intune"; totalStorageSpaceInBytes = 256GB; freeStorageSpaceInBytes = 45GB; azureADDeviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }
+        [PSCustomObject]@{ Id = "66666666-7777-8888-9999-000000000000"; deviceName = "DESKTOP-DEV-02"; serialNumber = "MXL1234"; userPrincipalName = "meganb@contoso.com"; model = "OptiPlex 7090"; operatingSystem = "Windows"; osVersion = "10.0.19045"; complianceState = "noncompliant"; lastSyncDateTime = (Get-Date).AddDays(-3); managementAgent = "intune"; totalStorageSpaceInBytes = 512GB; freeStorageSpaceInBytes = 12GB; azureADDeviceId = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff" }
     )
 }
 
@@ -29,25 +52,26 @@ if (-not $TestMode) {
 while ($true) {
     Clear-Host
     
-    # Header - No Justification parameter to avoid InvalidOperation error
-    Write-SpectreFigletText -Text "Intune" -Color Cyan
+    Write-SpectreFigletText -Text "Intune Help Desk" -Color Cyan
     "----------------------------------------------------------------" | Out-SpectreHost
     Write-Host ""
     
-    $choices = $allDevices | ForEach-Object { "$($_.deviceName) | $($_.serialNumber)" }
-    $selectionString = Read-SpectreSelection -Title "Search Device (ESC to exit)" -Choices $choices -EnableSearch
+    $choices = $allDevices | ForEach-Object { "$($_.deviceName) | $($_.serialNumber) | $($_.Id)" }
+    $selectionString = Read-SpectreSelection -Title "Search Device (ESC to exit)" -Choices $choices -EnableSearch -PageSize 15
     
     if (-not $selectionString) { break } 
 
-    $selectedName = ($selectionString -split "\|")[0].Trim()
-    $targetDevice = $allDevices | Where-Object { $_.deviceName -eq $selectedName }
+    $selectedId = ($selectionString -split "\|")[-1].Trim()
+    $targetDevice = $allDevices | Where-Object { $_.Id -eq $selectedId } | Select-Object -First 1
 
     Clear-Host
     "Diagnostics: [bold cyan]$($targetDevice.deviceName)[/]" | Out-SpectreHost
     "----------------------------------------------------------------" | Out-SpectreHost
     Write-Host ""
 
-    # DASHBOARD PANELS
+    # ------------------------------------------
+    # ROW 1: IDENTITY & HEALTH PANELS
+    # ------------------------------------------
     $idText = "Serial: [bold]$($targetDevice.serialNumber)[/]`nUser: [deepskyblue1]$($targetDevice.userPrincipalName)[/]`nModel: $($targetDevice.model)"
     $identityPanel = $idText | Format-SpectrePanel -Header "Identity"
 
@@ -58,7 +82,9 @@ while ($true) {
     @($identityPanel, $healthPanel) | Format-SpectreColumns | Out-SpectreHost
     Write-Host ""
 
-    # STORAGE CHART
+    # ------------------------------------------
+    # ROW 2: STORAGE CHART
+    # ------------------------------------------
     try {
         $total = [Math]::Round($targetDevice.totalStorageSpaceInBytes / 1GB, 0)
         $free = [Math]::Round($targetDevice.freeStorageSpaceInBytes / 1GB, 0)
@@ -69,22 +95,64 @@ while ($true) {
             (New-SpectreChartItem -Label "Free ($free GB)" -Value $free -Color Green)
         )
         $chartItems | Format-SpectreBreakdownChart | Format-SpectrePanel -Header "Storage" | Out-SpectreHost
-    } catch { }
+    } catch { 
+        "Storage metrics unavailable." | Format-SpectrePanel -Header "Storage" | Out-SpectreHost
+    }
     Write-Host ""
 
-    # RECENT APPS
+    # ------------------------------------------
+    # ROW 3: LIVE GRAPH DATA GATHERING
+    # ------------------------------------------
+    $appData = $null
+    $groupData = $null
+    $configData = $null
+
     if ($TestMode) {
-        $appData = @([PSCustomObject]@{ Name = "Chrome"; Ver = "124"; Size = "300MB" })
+        $appData = @([PSCustomObject]@{ Name = "Chrome"; Ver = "124" })
+        $groupData = @([PSCustomObject]@{ Group = "SG-IT-Admins" })
+        $configData = @([PSCustomObject]@{ Policy = "Win10_SecBaseline"; State = "compliant" })
     } else {
-        $apps = Get-MgDeviceManagementManagedDeviceDetectedApp -ManagedDeviceId $targetDevice.Id -Top 3
-        $appData = $apps | Select-Object @{n='Name';e={$_.DisplayName}}, @{n='Ver';e={$_.Version}}
+        # 1. Fetch Recent Detected Apps
+        try {
+            $appUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($targetDevice.Id)/detectedApps?`$top=5"
+            $appResponse = Invoke-MgGraphRequest -Method GET -Uri $appUri -ErrorAction Stop
+            $appData = $appResponse.value | Select-Object @{n='Name';e={$_.displayName}}, @{n='Ver';e={$_.version}}
+        } catch { }
+
+        # 2. Fetch Entra ID Groups
+        try {
+            if ($targetDevice.azureADDeviceId) {
+                $entraUri = "https://graph.microsoft.com/v1.0/devices?`$filter=deviceId eq '$($targetDevice.azureADDeviceId)'&`$select=id"
+                $entraDevice = Invoke-MgGraphRequest -Method GET -Uri $entraUri -ErrorAction Stop
+                
+                if ($entraDevice.value) {
+                    $entraId = $entraDevice.value[0].id
+                    $groupsUri = "https://graph.microsoft.com/v1.0/devices/$entraId/memberOf?`$select=displayName"
+                    $groupsResponse = Invoke-MgGraphRequest -Method GET -Uri $groupsUri -ErrorAction Stop
+                    $groupData = $groupsResponse.value | Select-Object @{n='Group';e={$_.displayName}}
+                }
+            }
+        } catch { }
+
+        # 3. Fetch Device Configurations (Policies)
+        try {
+            $configUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$($targetDevice.Id)/deviceConfigurationStates?`$top=5"
+            $configResponse = Invoke-MgGraphRequest -Method GET -Uri $configUri -ErrorAction Stop
+            $configData = $configResponse.value | Select-Object @{n='Policy';e={$_.displayName}}, @{n='State';e={$_.state}}
+        } catch { }
     }
-    $appData | Format-SpectreTable -Title "Recent Apps" | Out-SpectreHost
+
+    # Format into Spectre Tables
+    $appsTable = if ($appData) { $appData | Format-SpectreTable -Title "Detected Apps" } else { "No apps detected" | Format-SpectrePanel -Header "Detected Apps" }
+    $groupsTable = if ($groupData) { $groupData | Format-SpectreTable -Title "Entra ID Groups" } else { "No groups found" | Format-SpectrePanel -Header "Entra ID Groups" }
+    $configTable = if ($configData) { $configData | Format-SpectreTable -Title "Config Policies" } else { "No policies found" | Format-SpectrePanel -Header "Config Policies" }
+
+    # Display in a unified side-by-side grid
+    @($appsTable, $groupsTable, $configTable) | Format-SpectreColumns | Out-SpectreHost
 
     Write-Host ""
     "----------------------------------------------------------------" | Out-SpectreHost
     $portalUrl = "https://intune.microsoft.com/#view/Microsoft_Intune_Devices/DeviceSettingsMenuBlade/~/overview/managedDeviceId/$($targetDevice.Id)"
-    # Removed the brackets around the > to prevent the .ctor crash
     " > [blue][link=$portalUrl]Open in Intune Portal[/][/]" | Out-SpectreHost
     Write-Host ""
 
