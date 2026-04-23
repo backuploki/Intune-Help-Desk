@@ -1,0 +1,12 @@
+# PowerShell
+*.ps1xml
+*.clixml
+*.log
+
+# VS Code
+.vscode/
+
+# Graph Cache/Temp files
+.graph/
+*.csv
+*.json
