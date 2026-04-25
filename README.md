@@ -1,5 +1,6 @@
-<img width="1200" height="747" alt="Searching function" src="https://github.com/user-attachments/assets/b6410ef1-669c-4d2f-a0c5-d362e00ba1ae" />
-<img width="875" height="254" alt="Intro" src="https://github.com/user-attachments/assets/51513d13-b514-47f1-8d11-47c038c5e801" />
+<img width="842" height="86" alt="Logo" src="https://github.com/user-attachments/assets/61359630-82bb-460d-adcb-8aba8f61f4ca" />
+<img width="1200" height="747" alt="Searching function" src="https://github.com/user-attachments/assets/d34e61a4-3d64-43d8-9ef8-cd421fbb65ba" />
+
 
 # Intune Help Desk Dashboard
 
