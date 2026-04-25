@@ -26,26 +26,52 @@ foreach ($module in $requiredModules) {
     Import-Module $module -ErrorAction Stop
 }
 
-# Clear previous cached sessions
-try { Disconnect-MgGraph -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+# ==========================================
+# 1. HELPER FUNCTIONS
+# ==========================================
+function Connect-HelpDeskTenant {
+    Clear-Host
+    Write-SpectreFigletText -Text "Intune Help Desk" -Color Cyan
+    "----------------------------------------------------------------" | Out-SpectreHost
+    
+    Write-SpectreHost "`n[yellow]Clearing previous session data...[/]"
+    try { Disconnect-MgGraph -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+    
+    # Flush the console buffer so ghost 'Enter' keys don't skip the prompt
+    while ([console]::KeyAvailable) { $null = [console]::ReadKey($true) }
+    
+    # --- MULTI-TENANT ROUTING ---
+    Write-Host ""
+    $tenantPrompt = Read-SpectreText -Message "Enter target Tenant Domain (e.g. contoso.com) OR press ENTER for default"
+    $cleanTenant = $tenantPrompt.Trim()
 
-# Connect to Microsoft Graph using the interactive pop-up
-Write-SpectreHost "Prompting for authentication..." -Color Yellow
-Connect-MgGraph -Scopes "DeviceManagementManagedDevices.ReadWrite.All", "User.Read.All", "Directory.Read.All" -ContextScope Process
+    # FOOLPROOFING: If the user accidentally types an email address, extract just the domain
+    if ($cleanTenant -match "@") {
+        $cleanTenant = ($cleanTenant -split "@")[-1]
+        Write-SpectreHost "`n[cyan]Email detected. Extracting domain for Graph routing: $cleanTenant[/]"
+    }
+    
+    Write-SpectreHost "`n[yellow]Prompting for authentication...[/]"
+    
+    if (-not [string]::IsNullOrWhiteSpace($cleanTenant)) {
+        # Passing the TenantId forces WAM to pop the login box for the new environment!
+        Connect-MgGraph -TenantId $cleanTenant -Scopes "DeviceManagementManagedDevices.ReadWrite.All", "User.Read.All", "Directory.Read.All" -ContextScope Process -NoWelcome
+    } else {
+        Connect-MgGraph -Scopes "DeviceManagementManagedDevices.ReadWrite.All", "User.Read.All", "Directory.Read.All" -ContextScope Process -NoWelcome
+    }
 
-# Validate Connection so we don't proceed without auth
-$graphContext = Get-MgContext
-if ($graphContext) {
-    Write-SpectreHost "Connected as: $($graphContext.Account)" -Color Green
-    Start-Sleep -Seconds 2
-} else {
-    Write-SpectreHost "Failed to authenticate to Microsoft Graph. Exiting..." -Color Red
-    exit
+    # Validate Connection and scope it globally for the banner
+    $script:graphContext = Get-MgContext
+    if ($script:graphContext) {
+        Write-SpectreHost "`n[green]Successfully connected to Tenant: $($script:graphContext.TenantId)[/]"
+        Write-SpectreHost "[green]Authenticated as: $($script:graphContext.Account)[/]"
+        Start-Sleep -Seconds 3
+    } else {
+        Write-SpectreHost "`n[red]Failed to authenticate to Microsoft Graph. Exiting...[/]"
+        exit
+    }
 }
 
-# ==========================================
-# 1. HELPER FUNCTIONS (API Calls)
-# ==========================================
 function Get-HDDeviceApps {
     param([string]$DeviceId)
     try {
@@ -81,19 +107,34 @@ function Get-HDDeviceConfig {
 }
 
 # ==========================================
-# 2. MAIN APPLICATION LOOP
+# 2. INITIALIZATION
+# ==========================================
+if (-not $TestMode) {
+    Connect-HelpDeskTenant
+}
+
+# ==========================================
+# 3. MAIN APPLICATION LOOP
 # ==========================================
 while ($true) {
     Clear-Host
     Write-SpectreFigletText -Text "Intune Help Desk" -Color Cyan
     "----------------------------------------------------------------" | Out-SpectreHost
+    
+    # Permanent session banner so the user never flies blind
+    if ($script:graphContext) {
+        Write-SpectreHost "[dim]Active Session: $($script:graphContext.Account) | Tenant: $($script:graphContext.TenantId)[/]"
+        "----------------------------------------------------------------" | Out-SpectreHost
+    }
     Write-Host ""
     
     # ------------------------------------------
-    # SEARCH & SELECTION (Optimized for scale)
+    # SEARCH & SELECTION (Optimized for Graph Quirks)
     # ------------------------------------------
     if ($TestMode) {
-        $searchTerm = Read-SpectreText -Message "Enter search term (Test Mode: press ENTER for all, or 'exit')"
+        $rawInput = Read-SpectreText -Message "Enter search term (Test Mode: press ENTER for all, or 'exit')"
+        $searchTerm = $rawInput.Replace("'", "").Replace('"', "").Trim()
+        
         if ($searchTerm -eq 'exit') { break }
         
         $devices = @(
@@ -101,16 +142,54 @@ while ($true) {
             [PSCustomObject]@{ Id = "66666666-7777-8888-9999-000000000000"; deviceName = "DESKTOP-DEV-02"; serialNumber = "MXL1234"; userPrincipalName = "meganb@contoso.com"; model = "OptiPlex 7090"; operatingSystem = "Windows"; osVersion = "10.0.19045"; complianceState = "noncompliant"; lastSyncDateTime = (Get-Date).AddDays(-3); managementAgent = "intune"; totalStorageSpaceInBytes = 512GB; freeStorageSpaceInBytes = 12GB; azureADDeviceId = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff" }
         )
     } else {
-        $searchTerm = Read-SpectreText -Message "Enter a device name or serial number (or type 'exit')"
+        $rawInput = Read-SpectreText -Message "Enter a device name, serial number, or email (type switch for new tenant, exit to quit)"
+        
+        # Sanitize input: Remove accidental quotes and spaces
+        $searchTerm = $rawInput.Replace("'", "").Replace('"', "").Trim()
+        
         if ($searchTerm -eq 'exit' -or [string]::IsNullOrWhiteSpace($searchTerm)) { break }
+        
+        if ($searchTerm -eq 'switch') {
+            Connect-HelpDeskTenant
+            continue
+        }
 
-        $devices = Invoke-SpectreCommandWithStatus -Title "Searching Intune..." -Spinner "Dots2" -Color Cyan -ScriptBlock {
-            Get-MgDeviceManagementManagedDevice -Filter "startswith(deviceName, '$searchTerm') or serialNumber eq '$searchTerm'" -Property "id,deviceName,serialNumber,userPrincipalName,model,operatingSystem,osVersion,complianceState,lastSyncDateTime,managementAgent,totalStorageSpaceInBytes,freeStorageSpaceInBytes,azureADDeviceId"
+        Write-SpectreHost "`n[cyan]Searching Intune for '$searchTerm'...[/]"
+        
+        # The specific properties we need from Graph
+        $props = @("Id","deviceName","serialNumber","userPrincipalName","model","operatingSystem","osVersion","complianceState","lastSyncDateTime","managementAgent","totalStorageSpaceInBytes","freeStorageSpaceInBytes","azureADDeviceId")
+        
+        $rawDevices = $null
+        
+        # Attempt 1: EXACT Device Name Match
+        $rawDevices = Get-MgDeviceManagementManagedDevice -Filter "deviceName eq '$searchTerm'" -Property $props -ErrorAction SilentlyContinue
+        
+        # Attempt 2: Exact Serial Number Match
+        if (-not $rawDevices) {
+            $rawDevices = Get-MgDeviceManagementManagedDevice -Filter "serialNumber eq '$searchTerm'" -Property $props -ErrorAction SilentlyContinue
+        }
+        
+        # Attempt 3: User Email (UPN) Match
+        if (-not $rawDevices -and $searchTerm -match "@") {
+            $rawDevices = Get-MgDeviceManagementManagedDevice -Filter "userPrincipalName eq '$searchTerm'" -Property $props -ErrorAction SilentlyContinue
+        }
+        
+        # Attempt 4: PARTIAL Device Name Match (Fallback)
+        if (-not $rawDevices -and -not ($searchTerm -match "@")) {
+            $rawDevices = Get-MgDeviceManagementManagedDevice -Filter "startswith(deviceName, '$searchTerm')" -Property $props -ErrorAction SilentlyContinue
+        }
+
+        # CRITICAL FIX: Convert raw Graph objects to standard PSCustomObjects. 
+        # Live Graph objects often fail to render correctly inside string variables.
+        if ($rawDevices) {
+            $devices = @($rawDevices | Select-Object $props)
+        } else {
+            $devices = $null
         }
     }
 
     if (-not $devices) {
-        Write-SpectreHost "`nNo devices found matching '$searchTerm'." -Color Yellow
+        Write-SpectreHost "`n[yellow]No devices found matching '$searchTerm'.[/]"
         Start-Sleep -Seconds 2
         continue
     }
@@ -194,7 +273,7 @@ while ($true) {
         # ------------------------------------------
         # ROW 4: ACTION MENU
         # ------------------------------------------
-        $action = Read-SpectreSelection -Title "Device Actions" -Choices @("New Search", "Sync Device", "Reboot Device", "Open in Intune", "Exit")
+        $action = Read-SpectreSelection -Title "Device Actions" -Choices @("New Search", "Sync Device", "Reboot Device", "Open in Intune", "Switch Tenant", "Exit")
 
         switch ($action) {
             "New Search" {
@@ -206,7 +285,7 @@ while ($true) {
                         Sync-MgDeviceManagementManagedDevice -ManagedDeviceId $targetDevice.Id
                     }
                 }
-                Write-SpectreHost "Sync initiated successfully!" -Color Green
+                Write-SpectreHost "[green]Sync initiated successfully![/]"
                 Start-Sleep -Seconds 2
             }
             "Reboot Device" {
@@ -217,13 +296,17 @@ while ($true) {
                             Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$($targetDevice.Id)/rebootNow"
                         }
                     }
-                    Write-SpectreHost "Reboot command sent to device." -Color Green
+                    Write-SpectreHost "[green]Reboot command sent to device.[/]"
                     Start-Sleep -Seconds 2
                 }
             }
             "Open in Intune" {
                 $portalUrl = "https://intune.microsoft.com/#view/Microsoft_Intune_Devices/DeviceSettingsMenuBlade/~/overview/managedDeviceId/$($targetDevice.Id)"
                 Start-Process $portalUrl
+            }
+            "Switch Tenant" {
+                $viewingDevice = $false # Break out of the device loop
+                Connect-HelpDeskTenant  # Trigger the connection function
             }
             "Exit" {
                 exit
