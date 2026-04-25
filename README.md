@@ -1,3 +1,6 @@
+<img width="1200" height="747" alt="Searching function" src="https://github.com/user-attachments/assets/b6410ef1-669c-4d2f-a0c5-d362e00ba1ae" />
+<img width="875" height="254" alt="Intro" src="https://github.com/user-attachments/assets/51513d13-b514-47f1-8d11-47c038c5e801" />
+
 # Intune Help Desk Dashboard
 
 A fast, interactive CLI dashboard for IT Help Desk teams to query Microsoft Intune devices, view compliance health, and check storage capacity directly from the terminal. Built with PowerShell and Spectre Console.
